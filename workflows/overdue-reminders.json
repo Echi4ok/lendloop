@@ -1,0 +1,307 @@
+{
+  "name": "LendLoop - Daily Overdue Reminders",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 0 9 * * *"
+            }
+          ]
+        }
+      },
+      "id": "cbad7354-599d-4b45-a6d2-83fbd589b9db",
+      "name": "Daily at 09 UTC",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const { createHmac } = require('crypto');\n\nconst secret = $env.LENDLOOP_WEBHOOK_SECRET;\nconst site = ($env.CONVEX_SITE_URL ?? '').replace(/\\/+$/, '');\nif (!secret || !/^https?:\\/\\/[^\\s]+$/.test(site)) {\n  throw new Error('Set LENDLOOP_WEBHOOK_SECRET and CONVEX_SITE_URL for the overdue workflow');\n}\n\nconst body = '{}';\nconst timestamp = String(Math.floor(Date.now() / 1000));\nconst signature = createHmac('sha256', secret).update(timestamp + '.' + body).digest('hex');\nreturn [{ json: { url: site + '/automation/overdue', body, timestamp, signature } }];\n"
+      },
+      "id": "7bdfe9a8-5a40-45a0-8493-6aeb3ee895f2",
+      "name": "Sign Overdue Query",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-lendloop-timestamp",
+              "value": "={{ $json.timestamp }}"
+            },
+            {
+              "name": "x-lendloop-signature",
+              "value": "={{ $json.signature }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $json.body }}",
+        "options": {
+          "redirect": {
+            "redirect": {
+              "followRedirects": false
+            }
+          },
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 10000
+        }
+      },
+      "id": "5fd5ec2a-9d62-4936-9fb5-34fdfd9b66f9",
+      "name": "Fetch Overdue Loans",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        480,
+        0
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000
+    },
+    {
+      "parameters": {
+        "jsCode": "const { createHash } = require('crypto');\n\nconst response = $input.first().json;\nif (!Array.isArray(response.loans)) {\n  throw new Error('Convex overdue endpoint did not return a loans array');\n}\n\nconst reminderDate = new Date().toISOString().slice(0, 10);\nconst seen = new Set();\nconst items = [];\nfor (const loan of response.loans) {\n  if (!loan || typeof loan.loanId !== 'string' || !loan.loanId.trim()) {\n    throw new Error('Convex overdue endpoint returned an invalid loan reference');\n  }\n  if (seen.has(loan.loanId)) continue;\n  seen.add(loan.loanId);\n  const reference = createHash('sha256')\n    .update(loan.loanId + '.' + reminderDate)\n    .digest('hex')\n    .slice(0, 16);\n  items.push({ json: { loanId: loan.loanId, reminderDate, reference } });\n}\nif (items.length === 0) {\n  console.log('[lendloop] no overdue reminders due');\n}\nreturn items;\n"
+      },
+      "id": "3036125b-99d0-4822-80e5-fbdab08ef9bf",
+      "name": "Prepare Reminder Claims",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "f4be9e6a-6868-4d31-90d0-18c1571ba569",
+      "name": "Claim Each Reminder",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        960,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const { createHmac } = require('crypto');\n\nconst secret = $env.LENDLOOP_WEBHOOK_SECRET;\nconst site = ($env.CONVEX_SITE_URL ?? '').replace(/\\/+$/, '');\nif (!secret || !/^https?:\\/\\/[^\\s]+$/.test(site)) {\n  throw new Error('Set LENDLOOP_WEBHOOK_SECRET and CONVEX_SITE_URL for the overdue workflow');\n}\n\nconst { loanId, reminderDate, reference } = $input.first().json;\nconst body = JSON.stringify({ loanId, reminderDate });\nconst timestamp = String(Math.floor(Date.now() / 1000));\nconst signature = createHmac('sha256', secret).update(timestamp + '.' + body).digest('hex');\nreturn [{\n  json: { url: site + '/automation/reminders', body, timestamp, signature, reference },\n  pairedItem: { item: 0 },\n}];\n"
+      },
+      "id": "230d2509-e7bc-427d-8ecf-70ced5fbd715",
+      "name": "Sign Reminder Claim",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-lendloop-timestamp",
+              "value": "={{ $json.timestamp }}"
+            },
+            {
+              "name": "x-lendloop-signature",
+              "value": "={{ $json.signature }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $json.body }}",
+        "options": {
+          "redirect": {
+            "redirect": {
+              "followRedirects": false
+            }
+          },
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 10000
+        }
+      },
+      "id": "109e290b-448b-4c16-bae2-d0623297a87b",
+      "name": "Record Reminder in Convex",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1440,
+        160
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const { recorded } = $input.first().json;\nconst { reference } = $('Sign Reminder Claim').item.json;\n\nif (typeof recorded !== 'boolean') {\n  console.error('[lendloop] overdue reminder claim failed after retries: ' + reference);\n  return [{ json: { outcome: 'failed', reference } }];\n}\nif (!recorded) {\n  return [{ json: { outcome: 'skipped', reference } }];\n}\n\n// A successful atomic claim is required before logging a mock notification.\nconsole.log('[lendloop] ' + JSON.stringify({\n  delivery: 'mock',\n  notification: 'overdue.reminder',\n  reference,\n}));\nreturn [{ json: { outcome: 'recorded', reference } }];\n"
+      },
+      "id": "f5fab62c-4b15-4b49-a047-723d53b490a2",
+      "name": "Mock Notification After Claim",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const outcomes = $input.all().map(({ json }) => json.outcome);\nconst counts = {\n  recorded: outcomes.filter((outcome) => outcome === 'recorded').length,\n  skipped: outcomes.filter((outcome) => outcome === 'skipped').length,\n  failed: outcomes.filter((outcome) => outcome === 'failed').length,\n};\nconsole.log('[lendloop] overdue reminder run ' + JSON.stringify(counts));\nif (counts.failed > 0) {\n  throw new Error(counts.failed + ' overdue reminder claim(s) failed after retries');\n}\nreturn [{ json: counts }];\n"
+      },
+      "id": "6271fa8c-efca-49f5-ac29-205e2a7aa9b1",
+      "name": "Summarize Reminder Run",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        -140
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Daily at 09 UTC": {
+      "main": [
+        [
+          {
+            "node": "Sign Overdue Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sign Overdue Query": {
+      "main": [
+        [
+          {
+            "node": "Fetch Overdue Loans",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Overdue Loans": {
+      "main": [
+        [
+          {
+            "node": "Prepare Reminder Claims",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Reminder Claims": {
+      "main": [
+        [
+          {
+            "node": "Claim Each Reminder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim Each Reminder": {
+      "main": [
+        [
+          {
+            "node": "Summarize Reminder Run",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Sign Reminder Claim",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sign Reminder Claim": {
+      "main": [
+        [
+          {
+            "node": "Record Reminder in Convex",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record Reminder in Convex": {
+      "main": [
+        [
+          {
+            "node": "Mock Notification After Claim",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mock Notification After Claim": {
+      "main": [
+        [
+          {
+            "node": "Claim Each Reminder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Etc/UTC",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": false
+  },
+  "id": "lendloopDue00001",
+  "tags": []
+}

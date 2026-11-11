@@ -1,0 +1,37 @@
+services:
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:2.47.4
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5678:5678"
+    environment:
+      N8N_HOST: localhost
+      N8N_PORT: "5678"
+      N8N_PROTOCOL: http
+      WEBHOOK_URL: ${N8N_WEBHOOK_BASE_URL:-http://localhost:5678/}
+      GENERIC_TIMEZONE: Etc/UTC
+      TZ: Etc/UTC
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
+      # One trusted local operator. Code nodes use env-supplied secrets and crypto.
+      N8N_RUNNERS_MODE: internal
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
+      NODE_FUNCTION_ALLOW_BUILTIN: crypto
+      N8N_PAYLOAD_SIZE_MAX: "1"
+      # Static webhook receipts are written at successful execution completion.
+      N8N_CONCURRENCY_PRODUCTION_LIMIT: "1"
+      EXECUTIONS_DATA_SAVE_ON_SUCCESS: none
+      EXECUTIONS_DATA_SAVE_ON_ERROR: all
+      EXECUTIONS_DATA_SAVE_MANUAL_EXECUTIONS: "false"
+      EXECUTIONS_DATA_PRUNE: "true"
+      EXECUTIONS_DATA_MAX_AGE: "24"
+      LENDLOOP_WEBHOOK_SECRET: ${LENDLOOP_WEBHOOK_SECRET:?Set LENDLOOP_WEBHOOK_SECRET to the same value as Convex}
+      CONVEX_SITE_URL: ${CONVEX_SITE_URL:-http://host.docker.internal:3211}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - lendloop_n8n_data:/home/node/.n8n
+      - ./workflows:/workflows:ro
+
+volumes:
+  lendloop_n8n_data:

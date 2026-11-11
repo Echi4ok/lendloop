@@ -1,0 +1,97 @@
+{
+  "name": "LendLoop - Request Notifications",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "lendloop/request-events",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "id": "4f94b06a-9e57-4dd1-ad3b-36bcdf963ca5",
+      "name": "Signed Request Event",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "fb44eca8-4e36-4f73-9ea5-18b42321946b"
+    },
+    {
+      "parameters": {
+        "jsCode": "const { createHash, createHmac, timingSafeEqual } = require('crypto');\n\nconst maxClockSkewSeconds = 300;\nconst receiptLifetimeMs = 24 * 60 * 60 * 1000;\nconst maxReceipts = 10000;\nconst expectedStatus = {\n  'request.created': 'pending',\n  'request.approved': 'approved',\n  'request.declined': 'declined',\n  'request.returned': 'returned',\n};\n\nfunction respond(statusCode, body) {\n  return [{ json: { statusCode, body } }];\n}\n\nconst secret = $env.LENDLOOP_WEBHOOK_SECRET;\nif (!secret) {\n  throw new Error('LENDLOOP_WEBHOOK_SECRET is missing');\n}\n\nconst item = $input.first();\nconst headers = item.json.headers ?? {};\nconst timestamp = headers['x-lendloop-timestamp'];\nconst signature = headers['x-lendloop-signature'];\nconst now = Date.now();\nif (typeof timestamp !== 'string' || !/^\\d{10}$/.test(timestamp)\n    || typeof signature !== 'string' || !/^[a-f0-9]{64}$/.test(signature)\n    || Math.abs(Math.floor(now / 1000) - Number(timestamp)) > maxClockSkewSeconds) {\n  return respond(401, { ok: false, error: 'Invalid webhook signature' });\n}\n\nconst binary = item.binary?.data;\nif (!binary) {\n  return respond(400, { ok: false, error: 'Raw request body is required' });\n}\nconst rawBody = binary.id\n  ? await this.helpers.getBinaryDataBuffer(0, 'data')\n  : Buffer.from(binary.data, 'base64');\nif (rawBody.length > 16 * 1024) {\n  return respond(413, { ok: false, error: 'Payload too large' });\n}\n\nconst expected = createHmac('sha256', secret)\n  .update(timestamp + '.', 'utf8')\n  .update(rawBody)\n  .digest();\nif (!timingSafeEqual(Buffer.from(signature, 'hex'), expected)) {\n  return respond(401, { ok: false, error: 'Invalid webhook signature' });\n}\n\nlet payload;\ntry {\n  payload = JSON.parse(rawBody.toString('utf8'));\n} catch {\n  return respond(400, { ok: false, error: 'Invalid JSON payload' });\n}\nif (!payload || Array.isArray(payload) || typeof payload !== 'object'\n    || !Object.prototype.hasOwnProperty.call(expectedStatus, payload.event)\n    || payload.status !== expectedStatus[payload.event]\n    || !['eventId', 'loanId', 'recipientRef', 'toolName'].every((key) =>\n      typeof payload[key] === 'string' && payload[key].trim().length > 0)\n    || ![payload.startDate, payload.endDate].every((date) =>\n      typeof date === 'string' && /^\\d{4}-\\d{2}-\\d{2}$/.test(date))) {\n  return respond(400, { ok: false, error: 'Invalid event payload' });\n}\n\nconst eventKey = createHash('sha256').update(payload.eventId).digest('hex');\nconst state = $getWorkflowStaticData('global');\nconst receipts = state.requestReceipts ??= {};\nfor (const [key, receivedAt] of Object.entries(receipts)) {\n  if (receivedAt < now - receiptLifetimeMs) delete receipts[key];\n}\nif (Object.prototype.hasOwnProperty.call(receipts, eventKey)) {\n  return respond(200, { ok: true, duplicate: true });\n}\nif (Object.keys(receipts).length >= maxReceipts) {\n  console.error('[lendloop] request receipt capacity exhausted');\n  return respond(503, { ok: false, error: 'Receipt store temporarily unavailable' });\n}\n\n// Mock delivery deliberately omits the recipient, loan data and free-text tool name.\nreceipts[eventKey] = now;\nconsole.log('[lendloop] ' + JSON.stringify({\n  delivery: 'mock',\n  notification: payload.event,\n  reference: eventKey.slice(0, 16),\n}));\nreturn respond(200, { ok: true, duplicate: false, delivery: 'mock', notification: payload.event });\n"
+      },
+      "id": "e4d9ceeb-e70e-4ae0-a9a9-5e6c1a1d731a",
+      "name": "Verify and Notify",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        280,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json.body }}",
+        "options": {
+          "responseCode": "={{ $json.statusCode }}",
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Cache-Control",
+                "value": "no-store"
+              }
+            ]
+          }
+        }
+      },
+      "id": "7a416efb-0351-43e7-a780-3ff446caa462",
+      "name": "Return Receipt",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        560,
+        0
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Signed Request Event": {
+      "main": [
+        [
+          {
+            "node": "Verify and Notify",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify and Notify": {
+      "main": [
+        [
+          {
+            "node": "Return Receipt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Etc/UTC",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": false
+  },
+  "id": "lendloopReq00001",
+  "tags": []
+}
